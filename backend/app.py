@@ -1,136 +1,135 @@
+import os
+# Memory optimization BEFORE imports
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
+os.environ['CUDA_VISIBLE_DEVICES'] = '-1'  # Force CPU for stability
+
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from deepface import DeepFace
-import cv2
-import numpy as np
-import base64
-from PIL import Image
-import io
+import cv2, numpy as np, base64
+import time
 
 app = Flask(__name__)
 CORS(app)
 
-# Emotion emoji mapping for better UX
 EMOTION_EMOJIS = {
-    'happy': '😊',
-    'sad': '😢',
-    'angry': '😠',
-    'surprise': '😮',
-    'fear': '😨',
-    'disgust': '🤢',
-    'neutral': '😐'
+    'happy':'😊', 'sad': '😢', 'angry': '😠',
+    'surprise':'😮', 'fear':'😨', 'disgust':'🤢', 'neutral':'😐'
 }
 
-# Color mapping for UI
 EMOTION_COLORS = {
-    'happy': '#4CAF50',
-    'sad': '#2196F3',
-    'angry': '#F44336',
-    'surprise': '#FF9800',
-    'fear': '#9C27B0',
-    'disgust': '#795548',
-    'neutral': '#9E9E9E'
+    'happy': '#4CAF50', 'sad': '#2196F3', 'angry': '#F44336',
+    'surprise': '#FF9800', 'fear': '#9C27B0', 'disgust': '#795548', 'neutral': '#9E9E9E'
 }
+
+def preload_models():
+    """Load all models at startup to avoid crashes during requests"""
+    print("\n🔄 Starting model preloading...")
+    print("⚠️  This will take 1-2 minutes on first run...\n")
+    
+    try:
+        # Create a small dummy image
+        dummy_img = np.zeros((224, 224, 3), dtype=np.uint8)
+        
+        # Load each model individually with progress
+        models_to_load = ['age', 'gender', 'race', 'emotion']
+        
+        for i, action in enumerate(models_to_load, 1):
+            print(f"[{i}/4] Loading {action} model...", end=" ")
+            start = time.time()
+            
+            try:
+                DeepFace.analyze(
+                    dummy_img, 
+                    actions=[action],
+                    enforce_detection=False,
+                    silent=True
+                )
+                elapsed = time.time() - start
+                print(f"✅ ({elapsed:.1f}s)")
+            except Exception as e:
+                print(f"⚠️  Warning: {e}")
+        
+        # Test full analysis
+        print("\n🧪 Testing full analysis...", end=" ")
+        DeepFace.analyze(
+            dummy_img,
+            actions=['age', 'gender', 'race', 'emotion'],
+            enforce_detection=False,
+            silent=True
+        )
+        print("✅ All models ready!\n")
+        
+    except Exception as e:
+        print(f"\n⚠️  Model loading error: {e}")
+        print("API will still start but may be slower on first request.\n")
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    """Check if API is running"""
-    return jsonify({"status": "running", "message": "Emotion Detector API is active!"})
+    return jsonify({"status":"running", "message":"AI is awake with all models!"})
 
 @app.route('/detect-emotion', methods=['POST'])
 def detect_emotion():
-    """
-    Detect emotion from base64 encoded image
-    Expects JSON: {"image": "base64_string"}
-    """
     try:
         data = request.get_json()
-        
         if not data or 'image' not in data:
-            return jsonify({"error": "No image provided"}), 400
-        
-        # Decode base64 image
+            return jsonify({"success":False, "message": "No image provided"}), 400
+
+        # Decode image
         image_data = data['image'].split(',')[1] if ',' in data['image'] else data['image']
         image_bytes = base64.b64decode(image_data)
-        
-        # Convert to numpy array
         nparr = np.frombuffer(image_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         
         if img is None:
-            return jsonify({"error": "Invalid image format"}), 400
-        
-        # Analyze emotion using DeepFace
+            return jsonify({"success":False, "message": "Invalid image"}), 400
+
+        # Analyze with ALL 4 models
         result = DeepFace.analyze(
             img, 
-            actions=['age', 'gender', 'emotion'],
+            actions=['age', 'gender', 'race', 'emotion'],
             enforce_detection=False, 
             detector_backend='opencv',
             silent=True
         )
-        
-        # Extract emotion data
-        if isinstance(result, list):
-            result = result[0]
-        
-        age = result['age']
-        gender = result['gender']
-        emotions = result['emotion']
-        dominant_emotion = result['dominant_emotion']
-        
-        # Sort emotions by confidence
-        sorted_emotions = sorted(emotions.items(), key=lambda x: x[1], reverse=True)
-        
-        response = {
-            "success": True,
-            "dominant_emotion": dominant_emotion,
-            "emoji": EMOTION_EMOJIS.get(dominant_emotion, '🤔'),
-            "color": EMOTION_COLORS.get(dominant_emotion, '#000000'),
-            "confidence": round(emotions[dominant_emotion], 2),
-            "all_emotions": {k: round(v, 2) for k, v in sorted_emotions},
-            "age": age,
-            "gender": gender,
-            "face_detected": True
-        }
-        
-        return jsonify(response)
-    
-    except ValueError as ve:
-        # No face detected
+
+        # Extract results
+        analysis = result[0] if isinstance(result, list) else result
+        emotions = analysis['emotion']
+        dominant = analysis['dominant_emotion']
+
         return jsonify({
-            "success": False,
-            "error": "No face detected",
-            "face_detected": False,
-            "message": "Please ensure your face is visible in the camera"
-        }), 200
+            "success": True,
+            
+            # Emotion data
+            "dominant_emotion": dominant,
+            "emoji": EMOTION_EMOJIS.get(dominant, '😐'),
+            "color": EMOTION_COLORS.get(dominant, '#9E9E9E'),
+            "confidence": round(float(emotions[dominant]), 2),
+            "all_emotions": {k: round(float(v), 2) for k, v in sorted(emotions.items(), key=lambda x: x[1], reverse=True)},
+            
+            # Additional face data
+            "age": int(analysis['age']),
+            "gender": analysis['dominant_gender'],
+            "race": analysis['dominant_race'],
+            
+            "face_detected": True
+        })
     
     except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e),
-            "face_detected": False
-        }), 500
-
-@app.route('/test', methods=['GET'])
-def test():
-    """Test endpoint with sample response"""
-    return jsonify({
-        "success": True,
-        "dominant_emotion": "happy",
-        "emoji": "😊",
-        "color": "#4CAF50",
-        "confidence": 85.5,
-        "all_emotions": {
-            "happy": 85.5,
-            "neutral": 10.2,
-            "surprise": 4.3
-        },
-        "face_detected": True,
-        "message": "This is a test response"
-    })
+        print("🔥 ERROR:", repr(e))
+        return jsonify({"success": False, "message": str(e)}), 500
 
 if __name__ == '__main__':
-    print("🚀 Emotion Detection API Starting...")
-    print("📍 Running on http://localhost:5001")
-    print("✅ Health check: http://localhost:5001/health")
-    app.run(debug=True, port=5001, threaded=True)
+    print("=" * 60)
+    print("🚀 AI EMOTION DETECTOR - FULL ANALYSIS MODE")
+    print("=" * 60)
+    
+    # Preload all models BEFORE starting server
+    preload_models()
+    
+    print("📍 Server starting at http://localhost:5000")
+    print("=" * 60)
+    
+    app.run(debug=True, port=5000, threaded=True, use_reloader=False)  # use_reloader=False prevents double loading
